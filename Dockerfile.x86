@@ -1,0 +1,92 @@
+FROM debian:buster
+
+# Add arm64 and armhf architectures for cross-compilation
+RUN dpkg --add-architecture armhf && dpkg --add-architecture arm64
+
+# Install initial dependencies, including cross-compilation tools and Python with numpy
+RUN apt-get update && \
+    apt-get install -y \
+    libc6-dev:arm64 \
+    libc6-dev:armhf \
+    sudo \
+    debhelper \
+    python \
+    python3-all \
+    python3-numpy \
+    python3-setuptools \
+    python3-six \
+    python3-wheel \
+    libpython3-dev \
+    libpython3-dev:armhf \
+    libpython3-dev:arm64 \
+    build-essential \
+    crossbuild-essential-armhf \
+    crossbuild-essential-arm64 \
+    libusb-1.0-0-dev \
+    libusb-1.0-0-dev:arm64 \
+    libusb-1.0-0-dev:armhf \
+    zlib1g-dev \
+    zlib1g-dev:armhf \
+    zlib1g-dev:arm64 \
+    pkg-config \
+    zip \
+    unzip \
+    curl \
+    wget \
+    git \
+    vim \
+    mc \
+    software-properties-common && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install GLib and GStreamer dependencies by downloading and extracting necessary .deb packages
+RUN mkdir /debs && chmod a=rwx /debs && cd /debs && apt-get update && apt-get download \
+    libglib2.0-0 \
+    libglib2.0-0:armhf \
+    libglib2.0-0:arm64 \
+    libglib2.0-dev \
+    libglib2.0-dev:armhf \
+    libglib2.0-dev:arm64 \
+    libgstreamer1.0-0 \
+    libgstreamer1.0-0:armhf \
+    libgstreamer1.0-0:arm64 \
+    libgstreamer1.0-dev \
+    libgstreamer1.0-dev:armhf \
+    libgstreamer1.0-dev:arm64 \
+    libgstreamer-plugins-base1.0-0 \
+    libgstreamer-plugins-base1.0-0:armhf \
+    libgstreamer-plugins-base1.0-0:arm64 \
+    libgstreamer-plugins-base1.0-dev \
+    libgstreamer-plugins-base1.0-dev:armhf \
+    libgstreamer-plugins-base1.0-dev:arm64 && \
+    mkdir -p /usr/system_libs && \
+    for d in /debs/*.deb; do dpkg -x $d /usr/system_libs; done
+
+# Clone the libcoral repository with submodules
+WORKDIR /build
+RUN git clone --recurse-submodules https://github.com/google-coral/libcoral.git
+
+# Add TensorFlow Lite and Abseil dependencies to the WORKSPACE file
+RUN echo 'http_archive(name = "org_tensorflow_lite", urls = ["https://github.com/tensorflow/tensorflow/archive/refs/tags/v2.4.1.tar.gz"], strip_prefix = "tensorflow-2.4.1")' >> /build/libcoral/WORKSPACE && \
+    echo 'http_archive(name = "com_google_absl", urls = ["https://github.com/abseil/abseil-cpp/archive/refs/tags/20210324.2.tar.gz"], strip_prefix = "abseil-cpp-20210324.2")' >> /build/libcoral/WORKSPACE
+
+# Add the target for libcoral, including the pose_estimation dependency, to the BUILD file in the coral directory
+RUN echo 'cc_library(name = "libcoral", srcs = ["error_reporter.cc", "tflite_utils.cc"], hdrs = ["error_reporter.h", "bbox.h", "tflite_utils.h"], deps = ["@com_google_absl//absl/strings", "@com_google_absl//absl/status", "@glog", "@libedgetpu//tflite/public:edgetpu", "@org_tensorflow//tensorflow/lite:framework", "@org_tensorflow//tensorflow/lite/kernels:builtin_ops", "@org_tensorflow_lite//tensorflow/lite:stateful_error_reporter", "//coral/pose_estimation:posenet_decoder_op"], visibility = ["//visibility:public"])' >> /build/libcoral/coral/BUILD
+
+# Set environment variable for Python path
+ENV PYTHON_BIN_PATH=/usr/bin/python3
+
+# Download and install Bazel 4.0.0
+RUN wget -O /bazel https://github.com/bazelbuild/bazel/releases/download/4.0.0/bazel-4.0.0-installer-linux-x86_64.sh && \
+    chmod +x /bazel && \
+    /bazel && \
+    rm -f /bazel
+
+# Set the working directory to libcoral
+WORKDIR /build/libcoral
+
+# Build the static library target
+RUN bazel build --compilation_mode=opt --cpu=k8 //coral:libcoral
+
+# Package the output
+CMD tar -czvf /output/libcoral-x86.tar.gz -C /build/libcoral/bazel-bin coral
